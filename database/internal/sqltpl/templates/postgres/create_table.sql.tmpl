@@ -1,0 +1,6 @@
+CREATE TABLE {{.Table}} (
+    id BIGSERIAL PRIMARY KEY,
+    event_type VARCHAR(50),
+    payload TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+)
