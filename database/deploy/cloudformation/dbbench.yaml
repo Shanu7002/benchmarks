@@ -1,0 +1,417 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  dbbench test environment: disposable RDS PostgreSQL/MySQL instances plus one runner
+  EC2 host in the same VPC. Mirrors deploy/terraform. DBs are private, the runner has no
+  inbound access (use SSM Session Manager), passwords live in Secrets Manager.
+
+Parameters:
+  NamePrefix:
+    Type: String
+    Default: dbbench
+    AllowedPattern: "^[a-z][a-z0-9-]{1,20}$"
+    ConstraintDescription: 2-21 chars, lowercase letters, digits, hyphens, starting with a letter.
+  EnablePostgres:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+  EnableMysql:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+  PostgresVersion:
+    Type: String
+    Default: "16"
+  MysqlVersion:
+    Type: String
+    Default: "8.0"
+  DbInstanceClass:
+    Type: String
+    Default: db.t4g.micro
+    Description: Same class for every DB so results are comparable. Keep it small.
+  DbStorageGb:
+    Type: Number
+    Default: 20
+    MinValue: 20
+    MaxValue: 100
+    Description: Fixed storage per DB. Autoscaling is deliberately not enabled.
+  RunnerInstanceType:
+    Type: String
+    Default: t4g.small
+    Description: arm64 type, to match the binary built with GOARCH=arm64.
+  RunnerTtlMinutes:
+    Type: Number
+    Default: 240
+    MinValue: 30
+    MaxValue: 1440
+    Description: The runner stops itself after this long. RDS keeps running; delete the stack when done.
+  VpcCidr:
+    Type: String
+    Default: 10.42.0.0/16
+  BudgetEmail:
+    Type: String
+    Default: ""
+    Description: Email for cost alerts. Empty = no budget created.
+  BudgetUsd:
+    Type: String
+    Default: "20"
+    Description: Monthly budget for resources tagged Project=dbbench (needs the cost allocation tag "Project" activated).
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64
+
+Conditions:
+  UsePostgres: !Equals [!Ref EnablePostgres, "true"]
+  UseMysql: !Equals [!Ref EnableMysql, "true"]
+  CreateBudget: !Not [!Equals [!Ref BudgetEmail, ""]]
+
+Resources:
+  # ------------------------------------------------------------ network
+  # No NAT gateway (it costs money by the hour). DBs are in private subnets with no
+  # route to the internet; only the runner is public, with no inbound rules.
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - { Key: Name, Value: !Sub "${NamePrefix}-vpc" }
+        - { Key: Project, Value: dbbench }
+
+  Igw:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - { Key: Name, Value: !Sub "${NamePrefix}-igw" }
+        - { Key: Project, Value: dbbench }
+
+  IgwAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref Igw
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Select [0, !Cidr [!Ref VpcCidr, 3, 8]]
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - { Key: Name, Value: !Sub "${NamePrefix}-public" }
+        - { Key: Project, Value: dbbench }
+
+  PrivateSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Select [1, !Cidr [!Ref VpcCidr, 3, 8]]
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      Tags:
+        - { Key: Name, Value: !Sub "${NamePrefix}-private-0" }
+        - { Key: Project, Value: dbbench }
+
+  PrivateSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Select [2, !Cidr [!Ref VpcCidr, 3, 8]]
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      Tags:
+        - { Key: Name, Value: !Sub "${NamePrefix}-private-1" }
+        - { Key: Project, Value: dbbench }
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - { Key: Name, Value: !Sub "${NamePrefix}-public" }
+        - { Key: Project, Value: dbbench }
+
+  PublicDefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: IgwAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref Igw
+
+  PublicRouteAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  # ------------------------------------------------------------ security groups
+  RunnerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "dbbench runner: no inbound, limited outbound"
+      VpcId: !Ref Vpc
+      SecurityGroupEgress:
+        - { IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 0.0.0.0/0, Description: "HTTPS to SSM, S3, Secrets Manager, package repos" }
+        - { IpProtocol: tcp, FromPort: 5432, ToPort: 5432, CidrIp: !Ref VpcCidr, Description: PostgreSQL inside the VPC }
+        - { IpProtocol: tcp, FromPort: 3306, ToPort: 3306, CidrIp: !Ref VpcCidr, Description: MySQL inside the VPC }
+      Tags:
+        - { Key: Name, Value: !Sub "${NamePrefix}-runner" }
+        - { Key: Project, Value: dbbench }
+
+  DbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "dbbench databases: only the runner may connect"
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 5432, ToPort: 5432, SourceSecurityGroupId: !Ref RunnerSecurityGroup, Description: PostgreSQL from the runner }
+        - { IpProtocol: tcp, FromPort: 3306, ToPort: 3306, SourceSecurityGroupId: !Ref RunnerSecurityGroup, Description: MySQL from the runner }
+      Tags:
+        - { Key: Name, Value: !Sub "${NamePrefix}-db" }
+        - { Key: Project, Value: dbbench }
+
+  # ------------------------------------------------------------ artifacts bucket
+  # Holds the dbbench binary, the run script, an optional targets.yml, and results.
+  # CloudFormation cannot delete a non-empty bucket: empty it before deleting the stack.
+  ArtifactsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${NamePrefix}-artifacts-${AWS::AccountId}-${AWS::Region}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - { Key: Project, Value: dbbench }
+
+  # ------------------------------------------------------------ databases
+  # Disposable by design: no Multi-AZ, no backups, no deletion protection, no storage
+  # autoscaling, not publicly accessible. RDS generates the password and keeps it in
+  # Secrets Manager (it never appears in parameters or template).
+  DbSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: dbbench private subnets
+      SubnetIds: [!Ref PrivateSubnetA, !Ref PrivateSubnetB]
+      Tags:
+        - { Key: Project, Value: dbbench }
+
+  PostgresDb:
+    Type: AWS::RDS::DBInstance
+    Condition: UsePostgres
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      DBInstanceIdentifier: !Sub "${NamePrefix}-postgres"
+      Engine: postgres
+      EngineVersion: !Ref PostgresVersion
+      DBInstanceClass: !Ref DbInstanceClass
+      AllocatedStorage: !Ref DbStorageGb
+      StorageType: gp3
+      StorageEncrypted: true
+      DBName: bench
+      MasterUsername: dbbench_admin
+      ManageMasterUserPassword: true
+      DBSubnetGroupName: !Ref DbSubnetGroup
+      VPCSecurityGroups: [!Ref DbSecurityGroup]
+      PubliclyAccessible: false
+      MultiAZ: false
+      AvailabilityZone: !Select [0, !GetAZs ""] # same AZ as the runner: no cross-AZ latency in results
+      BackupRetentionPeriod: 0
+      DeletionProtection: false
+      EnablePerformanceInsights: false
+      Tags:
+        - { Key: Project, Value: dbbench }
+
+  MysqlDb:
+    Type: AWS::RDS::DBInstance
+    Condition: UseMysql
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      DBInstanceIdentifier: !Sub "${NamePrefix}-mysql"
+      Engine: mysql
+      EngineVersion: !Ref MysqlVersion
+      DBInstanceClass: !Ref DbInstanceClass
+      AllocatedStorage: !Ref DbStorageGb
+      StorageType: gp3
+      StorageEncrypted: true
+      DBName: bench
+      MasterUsername: dbbench_admin
+      ManageMasterUserPassword: true
+      DBSubnetGroupName: !Ref DbSubnetGroup
+      VPCSecurityGroups: [!Ref DbSecurityGroup]
+      PubliclyAccessible: false
+      MultiAZ: false
+      AvailabilityZone: !Select [0, !GetAZs ""] # same AZ as the runner: no cross-AZ latency in results
+      BackupRetentionPeriod: 0
+      DeletionProtection: false
+      EnablePerformanceInsights: false
+      Tags:
+        - { Key: Project, Value: dbbench }
+
+  # ------------------------------------------------------------ runner
+  RunnerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore"
+      Policies:
+        - PolicyName: dbbench-runner
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ArtifactsRead
+                Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub "${ArtifactsBucket.Arn}/*"
+              - Sid: ResultsWrite
+                Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub "${ArtifactsBucket.Arn}/results/*"
+              - Sid: ListBucket
+                Effect: Allow
+                Action: s3:ListBucket
+                Resource: !GetAtt ArtifactsBucket.Arn
+              - !If
+                - UsePostgres
+                - Sid: ReadPostgresSecret
+                  Effect: Allow
+                  Action: secretsmanager:GetSecretValue
+                  Resource: !GetAtt PostgresDb.MasterUserSecret.SecretArn
+                - !Ref AWS::NoValue
+              - !If
+                - UseMysql
+                - Sid: ReadMysqlSecret
+                  Effect: Allow
+                  Action: secretsmanager:GetSecretValue
+                  Resource: !GetAtt MysqlDb.MasterUserSecret.SecretArn
+                - !Ref AWS::NoValue
+      Tags:
+        - { Key: Project, Value: dbbench }
+
+  RunnerProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref RunnerRole]
+
+  RunnerLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        MetadataOptions:
+          HttpTokens: required # IMDSv2 only
+          HttpEndpoint: enabled
+
+  Runner:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: !Ref RunnerInstanceType
+      IamInstanceProfile: !Ref RunnerProfile
+      InstanceInitiatedShutdownBehavior: stop
+      LaunchTemplate:
+        LaunchTemplateId: !Ref RunnerLaunchTemplate
+        Version: !GetAtt RunnerLaunchTemplate.LatestVersionNumber
+      NetworkInterfaces:
+        - DeviceIndex: "0"
+          AssociatePublicIpAddress: true
+          SubnetId: !Ref PublicSubnet
+          GroupSet: [!Ref RunnerSecurityGroup]
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs: { VolumeType: gp3, VolumeSize: 16, Encrypted: true }
+      Tags:
+        - { Key: Name, Value: !Sub "${NamePrefix}-runner" }
+        - { Key: Project, Value: dbbench }
+      UserData:
+        Fn::Base64: !Sub
+          - |
+            #!/bin/bash
+            # Installs only what the runner needs and a tiny wrapper; the real logic is
+            # deploy/scripts/dbbench-run.sh, downloaded from S3 on each run.
+            set -euo pipefail
+
+            dnf install -y jq >/dev/null
+
+            mkdir -p /etc/dbbench
+            cat > /etc/dbbench/env <<'ENV'
+            REGION=${AWS::Region}
+            BUCKET=${ArtifactsBucket}
+            PG_HOST=${PgHost}
+            PG_SECRET_ARN=${PgSecretArn}
+            PG_LABEL="rds postgres ${PostgresVersion} ${DbInstanceClass} ${DbStorageGb}GB ${AWS::Region}"
+            MYSQL_HOST=${MyHost}
+            MYSQL_SECRET_ARN=${MySecretArn}
+            MYSQL_LABEL="rds mysql ${MysqlVersion} ${DbInstanceClass} ${DbStorageGb}GB ${AWS::Region}"
+            ENV
+            chmod 644 /etc/dbbench/env # hosts and secret ARNs only, no passwords
+
+            cat > /usr/local/bin/dbbench-run <<'WRAP'
+            #!/bin/bash
+            set -euo pipefail
+            . /etc/dbbench/env
+            dir="${!DBBENCH_DIR:-$HOME/dbbench}"
+            mkdir -p "$dir"
+            aws s3 cp "s3://$BUCKET/dbbench-run.sh" "$dir/run.sh" --region "$REGION" --only-show-errors
+            exec bash "$dir/run.sh" "$@"
+            WRAP
+            chmod 755 /usr/local/bin/dbbench-run
+
+            # Safety net: stop the instance after the TTL (RDS keeps running; delete the stack when done).
+            shutdown -h +${RunnerTtlMinutes}
+          - PgHost: !If [UsePostgres, !GetAtt PostgresDb.Endpoint.Address, ""]
+            PgSecretArn: !If [UsePostgres, !GetAtt PostgresDb.MasterUserSecret.SecretArn, ""]
+            MyHost: !If [UseMysql, !GetAtt MysqlDb.Endpoint.Address, ""]
+            MySecretArn: !If [UseMysql, !GetAtt MysqlDb.MasterUserSecret.SecretArn, ""]
+
+  # ------------------------------------------------------------ cost alert (optional)
+  Budget:
+    Type: AWS::Budgets::Budget
+    Condition: CreateBudget
+    Properties:
+      Budget:
+        BudgetName: !Sub "${NamePrefix}-monthly"
+        BudgetType: COST
+        TimeUnit: MONTHLY
+        BudgetLimit: { Amount: !Ref BudgetUsd, Unit: USD }
+        CostFilters:
+          TagKeyValue: ["user:Project$dbbench"]
+      NotificationsWithSubscribers:
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: 80
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - { SubscriptionType: EMAIL, Address: !Ref BudgetEmail }
+        - Notification:
+            NotificationType: FORECASTED
+            ComparisonOperator: GREATER_THAN
+            Threshold: 100
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - { SubscriptionType: EMAIL, Address: !Ref BudgetEmail }
+
+Outputs:
+  ArtifactsBucket:
+    Description: Upload the dbbench binary and dbbench-run.sh here.
+    Value: !Ref ArtifactsBucket
+  RunnerInstanceId:
+    Value: !Ref Runner
+  SsmSessionCommand:
+    Description: Open a shell on the runner (no SSH, no open ports).
+    Value: !Sub "aws ssm start-session --region ${AWS::Region} --target ${Runner}"
+  PostgresEndpoint:
+    Condition: UsePostgres
+    Value: !GetAtt PostgresDb.Endpoint.Address
+  MysqlEndpoint:
+    Condition: UseMysql
+    Value: !GetAtt MysqlDb.Endpoint.Address

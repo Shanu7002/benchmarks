@@ -1,0 +1,17 @@
+# Copy to terraform.tfvars (git-ignored) and adjust.
+region            = "us-east-1"
+db_instance_class = "db.t4g.micro"
+db_storage_gb     = 20
+
+enable_postgres = true
+enable_mysql    = true
+
+runner_ttl_minutes = 240
+
+# Optional cost alert (needs the cost allocation tag "Project" activated in Billing).
+# budget_email = "you@example.com"
+# budget_usd   = 20
+
+tags = {
+  Owner = "your-name"
+}

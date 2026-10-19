@@ -2,6 +2,7 @@
 
 > New here? Read [GETTING_STARTED.md](GETTING_STARTED.md): how it works, safety guardrails, and a local walkthrough.
 > Want to add a database or a test? See [CONTRIBUTING.md](CONTRIBUTING.md).
+> Running it against real AWS databases? See [deploy/README.md](deploy/README.md).
 
 DB-agnostic benchmark runner. The workload is defined once in Go; each
 database only contributes a driver and the SQL that differs from the common

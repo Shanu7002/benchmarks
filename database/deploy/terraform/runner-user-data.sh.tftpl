@@ -1,0 +1,33 @@
+#!/bin/bash
+# Rendered by Terraform. Installs only what the runner needs and a tiny wrapper;
+# the real logic is deploy/scripts/dbbench-run.sh, downloaded from S3 on each run.
+set -euo pipefail
+
+dnf install -y jq >/dev/null
+
+mkdir -p /etc/dbbench
+cat > /etc/dbbench/env <<'ENV'
+REGION=${region}
+BUCKET=${bucket}
+PG_HOST=${pg_host}
+PG_SECRET_ARN=${pg_secret_arn}
+PG_LABEL="${pg_label}"
+MYSQL_HOST=${my_host}
+MYSQL_SECRET_ARN=${my_secret_arn}
+MYSQL_LABEL="${my_label}"
+ENV
+chmod 644 /etc/dbbench/env # hosts and secret ARNs only, no passwords
+
+cat > /usr/local/bin/dbbench-run <<'WRAP'
+#!/bin/bash
+set -euo pipefail
+. /etc/dbbench/env
+dir="$${DBBENCH_DIR:-$HOME/dbbench}"
+mkdir -p "$dir"
+aws s3 cp "s3://$BUCKET/dbbench-run.sh" "$dir/run.sh" --region "$REGION" --only-show-errors
+exec bash "$dir/run.sh" "$@"
+WRAP
+chmod 755 /usr/local/bin/dbbench-run
+
+# Safety net: stop the instance after the TTL (RDS keeps running; destroy the stack when done).
+shutdown -h +${ttl_minutes}
