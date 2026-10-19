@@ -39,7 +39,7 @@ func (bulkInsert) Run(ctx context.Context, env Env) (*report.Recorder, int, time
 			b := min(p.BatchSize, int(left))
 			args := make([]any, 0, b*2)
 			for i := 0; i < b; i++ {
-				args = append(args, "BENCH", payload)
+				args = append(args, env.EventType, payload)
 			}
 			t := time.Now()
 			err := env.exec(ctx, "insert_batch", map[string]any{"Batch": b}, args...)

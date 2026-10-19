@@ -136,15 +136,49 @@ The same data plus the parameters, label, and timing is saved as JSON in `result
 > Latency numbers from a laptop talking to a Docker container only prove the tool works.
 > They say nothing about how the databases compare in production.
 
+## 3.6 Configuration: what you can change without touching Go
+
+Nothing tunable is buried in the code. There are three places to change behavior:
+
+| Where | What it controls | Who edits it |
+|---|---|---|
+| `targets.yml` (git-ignored) | Which DBs to hit and each scenario's `rows`, `batch_size`, `concurrency`, `payload_bytes`, `operations` | You, per run |
+| `config/defaults.yml` | Values used when `targets.yml` omits something, the default `-timeout`, the benchmark table prefix (`bench_`) and the `event_type` value written | The team, via PR |
+| `config/limits.yml` | The safety limits (local vs remote), the "local host" detection list, row overhead, max batch size | The team, via PR, with a reason |
+
+Both `config/*.yml` files are **embedded into the binary at build time**, so the single
+static file you copy to a VM still works. `go run` always uses your current edits. To change them
+for an existing binary **without rebuilding**, point `-settings-dir` at a directory:
+
+```bash
+mkdir my-settings && cp config/limits.yml my-settings/
+$EDITOR my-settings/limits.yml
+go run ./cmd/dbbench -target pg-local -scenario bulk_insert -settings-dir my-settings -dry-run
+#   settings: embedded defaults.yml; my-settings/limits.yml
+```
+
+A file missing from that directory falls back to the embedded one, and the plan output
+always tells you where the values came from. Files are decoded **strictly**: a typo such
+as `max_row:` is an error, never a silently ignored setting. On a remote runner, upload the
+files to `s3://<bucket>/settings/` instead (see `deploy/README.md`).
+
+Still defined in code on purpose: the table **columns** (`id`, `event_type`, `payload`,
+`created_at`) live in the per-dialect `create_table` templates, because column types are
+dialect SQL. Changing the schema means editing those templates and any scenario that
+reads or writes the columns.
+
 ## 4. Guardrails: how it avoids burning your machine
 
 Safety is enforced in **four layers**. The first two are in the code and cannot be
 skipped by accident.
 
-### Layer 1: pre-flight limits (`internal/guard`)
+### Layer 1: pre-flight limits (`internal/guard`, values in `config/limits.yml`)
 
 Before connecting to anything, the params are checked. **Local targets** (DSN contains
-`127.0.0.1`, `localhost` or `::1`) get tight limits; **remote** targets get larger ones.
+`127.0.0.1`, `localhost` or `::1`, configurable via `local_hosts`) get tight limits;
+**remote** targets get larger ones. The numbers below are the shipped defaults from
+`config/limits.yml`; the file is validated on load (no zero limits, local never above
+remote, unknown keys rejected).
 
 | Limit | Local | Remote |
 |---|---|---|
@@ -171,7 +205,7 @@ lower the values, or pass -force if you really mean it
 
 ### Layer 2: runtime limits
 
-- **`-timeout`** (default `10m`): the whole run is aborted after this long.
+- **`-timeout`** (default `10m`, set by `run.timeout` in `config/defaults.yml`): the whole run is aborted after this long.
 - **Ctrl-C** stops the run and still drops the benchmark table.
 - **Connection pool** is capped at `concurrency + 2`, so the tool can't open hundreds of connections.
 - **Every scenario is capped by rows/operations, never by "fill the disk".** The old
@@ -318,7 +352,8 @@ rm -f results/*.json                      # optional
 
 ```
 cmd/dbbench/main.go            CLI, wires everything together
-internal/config/               loads targets.yml, defaults for params
+config/                        defaults.yml + limits.yml (embedded in the binary)
+internal/config/               loads targets.yml and config/defaults.yml
 internal/guard/                safety limits (pre-flight)
 internal/driver/               one file per database + registry
 internal/sqltpl/templates/     SQL as Go templates (common/ + per-dialect)

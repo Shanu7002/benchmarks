@@ -23,8 +23,9 @@ concepts (target, scenario, dialect) used below.
 | Add a scenario | `internal/scenario/<name>.go`, `internal/sqltpl/templates/common/`, `targets.example.yml` | drivers, `report`, `main.go` |
 | Change a scenario's numbers (rows, batch...) | your `targets.yml` (local) or `targets.example.yml` (shared defaults) | Go code |
 | Make a DB's SQL different | `internal/sqltpl/templates/<db>/<name>.sql.tmpl` | the scenario |
-| Change safety limits | `internal/guard/guard.go` + its test | anything else |
-| Add a new tunable parameter | `internal/config/config.go`, then `guard.go` if it affects load | drivers |
+| Change safety limits | `config/limits.yml` (values only) | `guard.go`, unless the check logic itself changes |
+| Change defaults (timeout, default params, table prefix, event type) | `config/defaults.yml` | Go code |
+| Add a new tunable parameter | `internal/config/config.go`, `config/defaults.yml`, then `config/limits.yml` + `guard.go` if it affects load | drivers |
 | Add a deploy target (Terraform/CloudFormation) | `deploy/` | the Go code |
 
 ## Files you normally should NOT touch
@@ -34,7 +35,8 @@ only do it deliberately, in its own PR, with tests.
 
 | File | Why it's sensitive |
 |---|---|
-| `internal/guard/guard.go` | The safety net that protects people's machines. Loosening a limit needs a reason in the PR |
+| `internal/guard/guard.go` | The *logic* of the safety net (limit values live in `config/limits.yml`). Only change it to add or fix a check |
+| `config/limits.yml` | The safety numbers themselves. Loosening one needs a reason in the PR. It is validated on load: local must not exceed remote, no zeros |
 | `internal/report/report.go` | Defines how latencies are computed and the result JSON. Changing it breaks comparisons with old results |
 | `internal/driver/driver.go` | The `Driver` interface and registry. Changing the interface forces every driver to change |
 | `internal/sqltpl/sqltpl.go` | Template lookup (`<dialect>/` then `common/`) and the `ph` / `values` helpers |
@@ -135,14 +137,17 @@ Example: an `update_by_id` scenario.
 Only needed when a scenario needs a knob that doesn't exist yet.
 
 1. Add the field to `Params` in `internal/config/config.go` with a `yaml:"..."` tag.
-2. Give it a safe default in `WithDefaults()`.
+2. Give it a default in `config/defaults.yml` under `scenario_params`, and make `WithDefaults()`
+   and `Settings.validate()` in `internal/config/config.go` handle it. The default must stay within the local limits.
 3. If it can increase load (rows, size, threads, duration), add a max for it to `Limits`
-   in `internal/guard/guard.go`, check it in `Check`, and add a test in `guard_test.go`.
+   in `internal/guard/guard.go` and to both `local:` and `remote:` in `config/limits.yml`,
+   check it in `Check`, validate it in `Policy.validate()`, and add a test in `guard_test.go`.
 4. Document it in GETTING_STARTED.md (params and guardrail table).
 
 ## 4. Changing safety limits
 
-The limits protect other people's laptops. Changing them:
+The limits protect other people's laptops. They live in `config/limits.yml`, so changing a
+number is a one-file edit. Changing them:
 - Needs a reason in the PR description.
 - Must keep `TestDefaultsPassLocal` passing: default params must always run on a laptop.
 - Must keep local limits stricter than remote limits.

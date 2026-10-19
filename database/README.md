@@ -15,6 +15,8 @@ go run ./cmd/dbbench -target pg-remote -scenario bulk_insert
 go test ./...
 ```
 
+Tunable values live in `config/` (`defaults.yml`, `limits.yml`) and `targets.yml`, not in the code. See GETTING_STARTED.md section 3.6.
+
 Results are written as JSON to `results/` (latency p50/p95/p99, throughput, params, target label).
 
 ## Adding a database

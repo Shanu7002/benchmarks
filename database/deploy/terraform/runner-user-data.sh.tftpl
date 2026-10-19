@@ -9,10 +9,13 @@ mkdir -p /etc/dbbench
 cat > /etc/dbbench/env <<'ENV'
 REGION=${region}
 BUCKET=${bucket}
+DB_NAME=${db_name}
 PG_HOST=${pg_host}
+PG_PORT=${pg_port}
 PG_SECRET_ARN=${pg_secret_arn}
 PG_LABEL="${pg_label}"
 MYSQL_HOST=${my_host}
+MYSQL_PORT=${my_port}
 MYSQL_SECRET_ARN=${my_secret_arn}
 MYSQL_LABEL="${my_label}"
 ENV
