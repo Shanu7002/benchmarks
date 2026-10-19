@@ -1,0 +1,20 @@
+# Used by ci/integration.sh (and the GitHub workflow). DSNs come from the environment.
+# Small on purpose: this proves the pipeline works, it is not a benchmark.
+targets:
+  pg-ci:
+    dialect: postgres
+    dsn: ${PG_DSN}
+    label: "ci postgres"
+  mysql-ci:
+    dialect: mysql
+    dsn: ${MYSQL_DSN}
+    label: "ci mysql"
+scenarios:
+  bulk_insert:
+    rows: 20000
+    batch_size: 500
+    concurrency: 2
+  point_lookup:
+    rows: 5000
+    operations: 2000
+    concurrency: 4

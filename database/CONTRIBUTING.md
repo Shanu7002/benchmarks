@@ -169,6 +169,26 @@ For anything that touches a driver, template or scenario, also run it for real:
 
 State in the PR which databases and scenarios you ran, and the results' `label`.
 
+### Continuous integration
+
+`.github/workflows/database.yml` runs on every PR and push to `master` that touches
+`database/**`. It has three jobs and one summary check called **`base`** (require that one in
+branch protection):
+
+| Job | What it guards | Reproduce locally |
+|---|---|---|
+| `go` | `gofmt`, tidy `go.mod`/`go.sum`, `go vet`, unit tests with `-race` (templates for every dialect, guard limits, config validation, strict YAML), host and static `linux/arm64` builds, no state/secrets/`targets.yml` tracked | the commands in the checklist above |
+| `integration` | Both scenarios on Postgres **and** MySQL service containers (0 errors, exact row cap, no leftover `bench_*` tables), plus the guardrails: oversized config refused before connecting, `-dry-run` never connects, `-settings-dir` override honoured, typos in config rejected | start the two containers (GETTING_STARTED.md section 5), export `PG_DSN`/`MYSQL_DSN`, run `ci/integration.sh` |
+| `deploy` | `terraform fmt`/`validate`, unchanged lock file, `cfn-lint`, `shellcheck`, and `deploy/scripts/dbbench-run.sh` run against a stubbed `aws` CLI (DSN URL-encoding, DB name and ports, settings override) | `ci/runner-script-test.sh` (needs only Go) |
+
+What CI does **not** cover: a real AWS deployment (`terraform plan/apply`), and performance. It
+proves the tool and templates are well-formed, not that numbers are good.
+
+Rules of thumb:
+- Adding a database or scenario? Extend `ci/targets.ci.yml` and `ci/integration.sh` so CI exercises it on every PR. A new dialect is only "supported" once CI runs it against a real instance.
+- Never "fix" a red CI by weakening a check. If a check is wrong, change it in its own commit and say why.
+- The workflow is path-filtered. If `base` is a required check, a PR that touches nothing under `database/` won't run it and will wait forever; add a path-agnostic variant or drop the requirement for those PRs.
+
 ## 6. Keeping results comparable
 
 Results from different versions of a scenario can't be compared. So:
