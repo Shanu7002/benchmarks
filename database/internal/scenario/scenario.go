@@ -22,6 +22,8 @@ type Env struct {
 	SQL    *sqltpl.Renderer
 	Params config.Params
 	Table  string
+	// EventType is the value written to the event_type column (config/defaults.yml).
+	EventType string
 }
 
 type Scenario interface {
@@ -84,7 +86,7 @@ func (e Env) insertRows(ctx context.Context, n int) error {
 		b := min(e.Params.BatchSize, n-done)
 		args := make([]any, 0, b*2)
 		for i := 0; i < b; i++ {
-			args = append(args, "BENCH", payload)
+			args = append(args, e.EventType, payload)
 		}
 		if err := e.exec(ctx, "insert_batch", map[string]any{"Batch": b}, args...); err != nil {
 			return err

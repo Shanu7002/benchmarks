@@ -1,0 +1,29 @@
+# Safety limits enforced BEFORE any connection is made (see internal/guard).
+# Local targets (laptop/Docker) get tight limits; remote targets get room, but are bounded.
+# Loosening a value needs a reason in the PR. Local must stay <= remote (checked at load).
+# Embedded into the binary; override without rebuilding using: dbbench -settings-dir <dir>
+
+# Per-row cost beyond the payload (id, event_type, timestamp, row header). Indexes and
+# WAL add more, which is why the data limits below are deliberately conservative.
+row_overhead_bytes: 64
+
+# One INSERT statement may carry at most this much payload (batch_size * payload_bytes).
+# Keeps statements under typical server packet limits (MySQL max_allowed_packet: 64 MiB).
+max_batch_mib: 16
+
+# A target is "local" if its DSN contains any of these substrings.
+local_hosts: ["127.0.0.1", "localhost", "[::1]", "@::1"]
+
+local:
+  max_rows: 500000
+  max_operations: 200000
+  max_concurrency: 8
+  max_payload_bytes: 16384 # 16 KiB
+  max_data_mib: 512 # rows * (payload_bytes + row_overhead_bytes)
+
+remote:
+  max_rows: 50000000
+  max_operations: 10000000
+  max_concurrency: 128
+  max_payload_bytes: 262144 # 256 KiB
+  max_data_mib: 20480 # 20 GiB

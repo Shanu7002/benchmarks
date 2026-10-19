@@ -6,7 +6,7 @@ data "aws_availability_zones" "available" {
 
 # Latest Amazon Linux 2023, arm64 (matches `GOARCH=arm64` in deploy/README.md).
 data "aws_ssm_parameter" "al2023_arm64" {
-  name = "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64"
+  name = var.runner_ami_ssm_parameter
 }
 
 locals {
@@ -87,8 +87,8 @@ resource "aws_vpc_security_group_egress_rule" "runner_postgres" {
   security_group_id = aws_security_group.runner.id
   description       = "PostgreSQL inside the VPC"
   ip_protocol       = "tcp"
-  from_port         = 5432
-  to_port           = 5432
+  from_port         = var.postgres_port
+  to_port           = var.postgres_port
   cidr_ipv4         = var.vpc_cidr
 }
 
@@ -96,8 +96,8 @@ resource "aws_vpc_security_group_egress_rule" "runner_mysql" {
   security_group_id = aws_security_group.runner.id
   description       = "MySQL inside the VPC"
   ip_protocol       = "tcp"
-  from_port         = 3306
-  to_port           = 3306
+  from_port         = var.mysql_port
+  to_port           = var.mysql_port
   cidr_ipv4         = var.vpc_cidr
 }
 
@@ -111,8 +111,8 @@ resource "aws_vpc_security_group_ingress_rule" "db_postgres" {
   security_group_id            = aws_security_group.db.id
   description                  = "PostgreSQL from the runner"
   ip_protocol                  = "tcp"
-  from_port                    = 5432
-  to_port                      = 5432
+  from_port                    = var.postgres_port
+  to_port                      = var.postgres_port
   referenced_security_group_id = aws_security_group.runner.id
 }
 
@@ -120,8 +120,8 @@ resource "aws_vpc_security_group_ingress_rule" "db_mysql" {
   security_group_id            = aws_security_group.db.id
   description                  = "MySQL from the runner"
   ip_protocol                  = "tcp"
-  from_port                    = 3306
-  to_port                      = 3306
+  from_port                    = var.mysql_port
+  to_port                      = var.mysql_port
   referenced_security_group_id = aws_security_group.runner.id
 }
 
@@ -157,14 +157,15 @@ resource "aws_db_instance" "postgres" {
   identifier     = "${var.name_prefix}-postgres"
   engine         = "postgres"
   engine_version = var.postgres_version
+  port           = var.postgres_port
   instance_class = var.db_instance_class
 
   allocated_storage = var.db_storage_gb
   storage_type      = "gp3"
   storage_encrypted = true
 
-  db_name                     = "bench"
-  username                    = "dbbench_admin"
+  db_name                     = var.db_name
+  username                    = var.db_username
   manage_master_user_password = true
 
   db_subnet_group_name   = aws_db_subnet_group.this.name
@@ -186,14 +187,15 @@ resource "aws_db_instance" "mysql" {
   identifier     = "${var.name_prefix}-mysql"
   engine         = "mysql"
   engine_version = var.mysql_version
+  port           = var.mysql_port
   instance_class = var.db_instance_class
 
   allocated_storage = var.db_storage_gb
   storage_type      = "gp3"
   storage_encrypted = true
 
-  db_name                     = "bench"
-  username                    = "dbbench_admin"
+  db_name                     = var.db_name
+  username                    = var.db_username
   manage_master_user_password = true
 
   db_subnet_group_name   = aws_db_subnet_group.this.name
@@ -293,6 +295,9 @@ resource "aws_instance" "runner" {
     region        = var.region
     bucket        = aws_s3_bucket.artifacts.bucket
     ttl_minutes   = var.runner_ttl_minutes
+    db_name       = var.db_name
+    pg_port       = var.postgres_port
+    my_port       = var.mysql_port
     pg_host       = var.enable_postgres ? aws_db_instance.postgres[0].address : ""
     pg_secret_arn = var.enable_postgres ? aws_db_instance.postgres[0].master_user_secret[0].secret_arn : ""
     pg_label      = "rds postgres ${var.postgres_version} ${var.db_instance_class} ${var.db_storage_gb}GB ${var.region}"

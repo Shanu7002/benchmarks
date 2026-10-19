@@ -8,7 +8,8 @@
 #   e.g. dbbench-run pg-rds bulk_insert -dry-run
 #
 # Reads /etc/dbbench/env (written by the stack's user-data): REGION, BUCKET and,
-# per enabled database, *_HOST, *_SECRET_ARN, *_LABEL. No passwords live there.
+# DB_NAME and, per enabled database, *_HOST, *_PORT, *_SECRET_ARN, *_LABEL.
+# No passwords live there.
 set -euo pipefail
 
 . "${DBBENCH_ENV:-/etc/dbbench/env}"
@@ -67,16 +68,27 @@ if [ -n "${PG_SECRET_ARN:-}" ]; then
   s=$(secret "$PG_SECRET_ARN")
   user=$(jq -r .username <<<"$s")
   pass=$(jq -rn --arg v "$(jq -r .password <<<"$s")" '$v|@uri') # URL-encode the password
-  export PG_DSN="postgres://$user:$pass@$PG_HOST:5432/bench?sslmode=require"
+  export PG_DSN="postgres://$user:$pass@$PG_HOST:${PG_PORT:-5432}/${DB_NAME:-bench}?sslmode=require"
 fi
 if [ -n "${MYSQL_SECRET_ARN:-}" ]; then
   s=$(secret "$MYSQL_SECRET_ARN")
   user=$(jq -r .username <<<"$s")
   pass=$(jq -r .password <<<"$s")
-  export MYSQL_DSN="$user:$pass@tcp($MYSQL_HOST:3306)/bench?tls=preferred"
+  export MYSQL_DSN="$user:$pass@tcp($MYSQL_HOST:${MYSQL_PORT:-3306})/${DB_NAME:-bench}?tls=preferred"
 fi
 
-"$DIR/dbbench" -config "$DIR/targets.yml" -target "$TARGET" -scenario "$SCENARIO" -out "$DIR/results" "$@"
+# Optional override of the embedded config/defaults.yml and config/limits.yml:
+# upload them to s3://$BUCKET/settings/ (no rebuild needed). Missing files fall back to embedded.
+SETTINGS_ARGS=()
+mkdir -p "$DIR/settings"
+if s3 sync "s3://$BUCKET/settings" "$DIR/settings" --delete 2>/dev/null && ls "$DIR"/settings/*.yml >/dev/null 2>&1; then
+  SETTINGS_ARGS=(-settings-dir "$DIR/settings")
+  echo "using settings from s3://$BUCKET/settings/"
+fi
+
+# ${arr[@]+...} keeps an empty array safe under `set -u` on older bash.
+"$DIR/dbbench" -config "$DIR/targets.yml" -target "$TARGET" -scenario "$SCENARIO" -out "$DIR/results" \
+  ${SETTINGS_ARGS[@]+"${SETTINGS_ARGS[@]}"} "$@"
 
 # Keep results somewhere that survives the instance.
 s3 sync "$DIR/results" "s3://$BUCKET/results/"

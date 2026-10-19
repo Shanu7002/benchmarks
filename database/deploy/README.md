@@ -55,6 +55,23 @@ These mirror the guardrails in the Go code (see `GETTING_STARTED.md`, section 4)
 | Runner IAM limited to its bucket and the DB secrets | exact ARNs | exact ARNs |
 | Runner egress limited to 443 and the DB ports | security group rules | security group |
 
+### Configurable values (nothing hard-coded)
+
+Everything below is a Terraform variable and a CloudFormation parameter, with validation:
+
+| Setting | Terraform | CloudFormation | Default |
+|---|---|---|---|
+| Region | `region` | stack region | `us-east-1` |
+| Initial database name | `db_name` | `DbName` | `bench` |
+| Master username | `db_username` | `DbUsername` | `dbbench_admin` |
+| PostgreSQL / MySQL port | `postgres_port` / `mysql_port` | `PostgresPort` / `MysqlPort` | `5432` / `3306` |
+| Runner AMI | `runner_ami_ssm_parameter` | `LatestAmiId` | AL2023 arm64 |
+| VPC CIDR | `vpc_cidr` | `VpcCidr` | `10.42.0.0/16` |
+
+The database name and ports are passed to the runner through `/etc/dbbench/env`, so the
+connection strings the script builds always match what was deployed. The Go-side safety limits
+and defaults are configured separately in `config/` (see `GETTING_STARTED.md`, section 3.6).
+
 Two things the stack **cannot** do for you:
 
 - **The TTL only stops the runner.** The RDS instances keep billing until you destroy the
@@ -119,6 +136,9 @@ aws s3 cp dist/dbbench                       s3://$BUCKET/dbbench
 aws s3 cp deploy/scripts/dbbench-run.sh      s3://$BUCKET/dbbench-run.sh
 # optional: your own targets/params (otherwise a sensible default is generated)
 aws s3 cp targets.yml                        s3://$BUCKET/targets.yml
+# optional: override the embedded config/defaults.yml and/or limits.yml (no rebuild needed;
+# a missing file falls back to the embedded one, and the plan output prints the source)
+aws s3 cp config/limits.yml                  s3://$BUCKET/settings/limits.yml
 ```
 
 **b. Open a shell on the runner** (no SSH):

@@ -1,0 +1,19 @@
+# Defaults used when targets.yml leaves something out. Embedded into the binary at
+# build time; override without rebuilding using: dbbench -settings-dir <dir>
+# (a file missing from <dir> falls back to the embedded one).
+
+run:
+  timeout: 10m # abort a run after this long (flag -timeout overrides)
+
+# Used for any scenario param omitted in targets.yml. Must stay within limits.yml's
+# *local* limits so a bare config always runs safely on a laptop.
+scenario_params:
+  rows: 100000
+  batch_size: 1000
+  concurrency: 1
+  payload_bytes: 1024
+  operations: 10000
+
+benchmark:
+  table_prefix: bench_ # scenario tables are named <prefix><scenario>; dropped after each run
+  event_type: BENCH # value written to the event_type column (max 50 chars)
