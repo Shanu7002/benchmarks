@@ -1,3 +1,8 @@
 targets.yml
 results/*
 !results/.gitkeep
+dist/
+.terraform/
+*.tfstate
+*.tfstate.*
+terraform.tfvars
