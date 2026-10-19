@@ -216,7 +216,7 @@ Follow this order. Don't skip to a big instance first.
 10. **State:** the Terraform here uses local state, fine for one person and a disposable stack. If several people share it, move to a remote backend (S3 bucket with versioning plus DynamoDB or S3 native locking) before anyone else runs `apply`.
 11. **Keep both IaC versions in sync.** They are intentional mirrors. Any change to networking, security groups, IAM, instance settings or parameters goes in **both**, in the same PR. The shared logic lives in `scripts/dbbench-run.sh` precisely so it isn't duplicated.
 12. **CI checks** (cheap, no AWS needed): `terraform fmt -check -recursive`, `terraform init -backend=false && terraform validate`, `cfn-lint deploy/cloudformation/dbbench.yaml`, and `shellcheck deploy/scripts/dbbench-run.sh`.
-13. Commit `terraform/.terraform.lock.hcl` so provider versions are reproducible. Never commit `terraform.tfvars`, state files, or results (all git-ignored).
+13. Commit `terraform/.terraform.lock.hcl` so provider versions are reproducible. It must hold hashes for every platform that runs `init` (laptops and CI). After changing providers or versions, regenerate it with `terraform providers lock -platform=linux_amd64 -platform=linux_arm64 -platform=darwin_arm64 -platform=darwin_amd64`; otherwise CI's "lock file unchanged" check fails. Never commit `terraform.tfvars`, state files, or results (all git-ignored).
 
 ## 9. Adding another database engine
 
