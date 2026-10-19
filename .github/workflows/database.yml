@@ -1,0 +1,163 @@
+name: database
+
+# Guards the "base" of database/: the Go runner, its safety limits, the two
+# supported databases end to end, and the deploy templates. Everything here can be
+# reproduced locally (see database/CONTRIBUTING.md, "Testing checklist").
+on:
+  pull_request:
+    paths: ["database/**", ".github/workflows/database.yml"]
+  push:
+    branches: [master]
+    paths: ["database/**", ".github/workflows/database.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: database-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: database
+
+jobs:
+  go:
+    name: Go (format, vet, unit tests, build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: database/go.mod
+          cache-dependency-path: database/go.sum
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then echo "Run gofmt on:"; echo "$unformatted"; exit 1; fi
+
+      - name: go.mod and go.sum are tidy
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+
+      - name: go vet
+        run: go vet ./...
+
+      # Covers template rendering for every dialect, the guard limits, config
+      # validation, strict YAML decoding and the embedded config/*.yml files.
+      - name: unit tests (race detector)
+        run: go test -race -count=1 ./...
+
+      - name: build the host binary
+        run: go build -o /dev/null ./cmd/dbbench
+
+      - name: build the deploy artifact (static linux/arm64)
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o "$RUNNER_TEMP/dbbench-arm64" ./cmd/dbbench
+          info=$(file "$RUNNER_TEMP/dbbench-arm64")
+          echo "$info"
+          grep -q "statically linked" <<<"$info"
+
+      - name: no state, secrets or local config tracked
+        working-directory: .
+        run: |
+          if git ls-files database | grep -E '\.tfstate|(^|/)terraform\.tfvars$|(^|/)targets\.yml$|results/.*\.json$'; then
+            echo "Files that must stay local are tracked"; exit 1
+          fi
+
+  integration:
+    name: Integration (Postgres + MySQL, all scenarios, guardrails)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: pw
+          POSTGRES_DB: bench
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: pw
+          MYSQL_DATABASE: bench
+        ports: ["3306:3306"]
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -uroot -ppw --silent"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 30
+    env:
+      PG_DSN: postgres://postgres:pw@127.0.0.1:5432/bench?sslmode=disable
+      MYSQL_DSN: root:pw@tcp(127.0.0.1:3306)/bench
+      MYSQL_CLI_ARGS: --protocol=tcp -h127.0.0.1 -P3306 -uroot -ppw bench
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: database/go.mod
+          cache-dependency-path: database/go.sum
+      - name: run ci/integration.sh
+        run: ci/integration.sh
+
+  deploy:
+    name: Deploy templates (Terraform, CloudFormation, scripts)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: database/go.mod
+          cache-dependency-path: database/go.sum
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.x
+          terraform_wrapper: false
+
+      - name: terraform fmt
+        run: terraform fmt -check -recursive -diff
+        working-directory: database/deploy/terraform
+
+      - name: terraform validate (no AWS credentials needed)
+        working-directory: database/deploy/terraform
+        run: |
+          terraform init -backend=false -input=false
+          terraform validate
+          # init must not rewrite the committed lock file
+          git diff --exit-code -- .terraform.lock.hcl
+
+      - name: cfn-lint
+        run: |
+          pipx install cfn-lint
+          cfn-lint deploy/cloudformation/dbbench.yaml
+
+      - name: shellcheck
+        run: shellcheck -x deploy/scripts/*.sh ci/*.sh
+
+      - name: runner script (stubbed aws CLI)
+        run: ci/runner-script-test.sh
+
+  # One stable name to require in branch protection instead of three job names.
+  base:
+    name: base
+    if: always()
+    needs: [go, integration, deploy]
+    runs-on: ubuntu-latest
+    steps:
+      - name: all required jobs passed
+        working-directory: .
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "job results: $RESULTS"
+          for r in $RESULTS; do [ "$r" = "success" ] || { echo "a required job did not succeed"; exit 1; }; done

@@ -12,6 +12,7 @@
 # No passwords live there.
 set -euo pipefail
 
+# shellcheck disable=SC1090 # path is dynamic on purpose (overridable for tests)
 . "${DBBENCH_ENV:-/etc/dbbench/env}"
 DIR="${DBBENCH_DIR:-$HOME/dbbench}"
 mkdir -p "$DIR/results"
@@ -42,9 +43,11 @@ else
   {
     echo "targets:"
     if [ -n "${PG_HOST:-}" ]; then
+      # shellcheck disable=SC2016 # ${PG_DSN} must stay literal: dbbench expands it
       printf '  pg-rds:\n    dialect: postgres\n    dsn: ${PG_DSN}\n    label: "%s"\n' "$PG_LABEL"
     fi
     if [ -n "${MYSQL_HOST:-}" ]; then
+      # shellcheck disable=SC2016 # ${MYSQL_DSN} must stay literal: dbbench expands it
       printf '  mysql-rds:\n    dialect: mysql\n    dsn: ${MYSQL_DSN}\n    label: "%s"\n' "$MYSQL_LABEL"
     fi
     cat <<'YAML'
